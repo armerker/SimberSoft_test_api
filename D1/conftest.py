@@ -1,115 +1,87 @@
-from http.client import responses
-
 import pytest
 import sys
 import os
-from typing import Dict, Any
+from faker import Faker
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.api_client import WordPressAPI
+from core.api_steps import WordPressSteps
 from core.db_client import WordPressDB
 from core.models import PostCreate, CommentCreate, PostModel
 
+fake = Faker("ru_RU")
 
 @pytest.fixture(scope="function")
-def api() -> WordPressAPI:
-    """Фикстура для API клиента"""
-    return WordPressAPI()
-
+def api() -> WordPressSteps:
+    """Инициализирует обертку WordPressSteps для работы с API через Allure-шаги."""
+    return WordPressSteps()
 
 @pytest.fixture(scope="function")
 def db() -> WordPressDB:
-    """Фикстура для БД клиента"""
+    """Создает подключение к БД и закрывает его после завершения теста."""
     db = WordPressDB()
     yield db
     db.close()
 
+@pytest.fixture
+def post_payload_factory():
+    """Возвращает функцию для генерации случайных данных поста (модель PostCreate)."""
+    def _make_payload(**kwargs):
+        payload = {
+            "title": fake.sentence(nb_words=5),
+            "content": fake.paragraph(nb_sentences=3),
+            "status": "publish"
+        }
+        payload.update(kwargs)
+        return PostCreate(**payload)
+    return _make_payload
 
 @pytest.fixture
-def post_data() -> PostCreate:
-    """Фикстура с тестовыми данными для поста"""
-    return PostCreate(
-        title="Тестовый пост от 19.03.2026",
-        content="Это содержание тестового поста, созданного через API для проверки создания постов",
-        status="publish"
-    )
-
+def post_data(post_payload_factory) -> PostCreate:
+    """Фикстура, возвращающая один готовый набор случайных данных для поста."""
+    return post_payload_factory()
 
 @pytest.fixture
-def comment_data() -> CommentCreate:
-    """Фикстура с тестовыми данными для комментария"""
-    return CommentCreate(
-        post=1,
-        content="Тестовый комментарий",
-        author_name="Автоматический тестер",
-        author_email="autotester@example.com",
-        author_url="https://example.com"
-    )
-
+def post_factory(api, post_payload_factory):
+    """Возвращает функцию для создания реального поста в WordPress через API."""
+    def _create_post(**kwargs):
+        payload = post_payload_factory(**kwargs)
+        return api.create_post(payload)
+    return _create_post
 
 @pytest.fixture
-def delete_post_data() -> PostCreate:
-    """Фикстура данных пост для удаления"""
-    return PostCreate(
-        title="Тестовый пост для удаления",
-        content="Это содержание тестового поста для удаления",
-        status="publish"
-    )
-
-
-@pytest.fixture
-def delete_comment_data() -> CommentCreate:
-    """Фикстура данных коммент для удаления"""
-    return CommentCreate(
-        post=1,
-        content="Тестовый комментарий для удаления",
-        author_name="Автоматический тестер для удаления",
-        author_email="autotester@example.com",
-        author_url="https://example.com"
-    )
-
+def comment_payload_factory():
+    """Возвращает функцию для генерации данных комментария (требует post_id)."""
+    def _make_payload(post_id, **kwargs):
+        payload = {
+            "post": post_id,
+            "content": fake.sentence(),
+            "author_name": fake.name(),
+            "author_email": fake.email(),
+            "author_url": fake.url()
+        }
+        payload.update(kwargs)
+        return CommentCreate(**payload)
+    return _make_payload
 
 @pytest.fixture
-def test_post(api, db) -> PostModel:
-    """Фикстура создает пост для тестов и возвращает модель"""
-    post_data = PostCreate(
-        title="тестовый пост",
-        content="содержание тестового поста"
-    )
-    post = api.create_post(post_data)
+def comment_factory(api, comment_payload_factory):
+    """Возвращает функцию для создания реального комментария через API."""
+    def _create_comment(post_id, **kwargs):
+        payload = comment_payload_factory(post_id, **kwargs)
+        return api.create_comment(payload)
+    return _create_comment
 
-    db_post = db.get_post(post.id)
-    if db_post is None:
-        print(f"❌ ПОСТ НЕ СОЗДАЛСЯ В БД! ID: {post.id}")
-
+@pytest.fixture
+def test_post(api, post_factory) -> PostModel:
+    """Создает пост перед тестом и автоматически удаляет его после (yield)."""
+    post = post_factory()
     yield post
-
     api.delete_post(post.id)
-
 
 @pytest.fixture
-def test_comment(api, db) -> int:
-    """Фикстура создает и удаляет комментарий"""
-    # Сначала создаем пост
-    post_data = PostCreate(
-        title="Пост для комментария",
-        content="Содержание для теста комментариев"
-    )
-    post = api.create_post(post_data)
-
-    # Создаем комментарий
-    comment_data = CommentCreate(
-        post=post.id,
-        content="тестовый контент",
-        author_name="тестер",
-        author_email="autotester@example.com",
-        author_url="https://example.com"
-    )
-    comment = api.create_comment(comment_data)
-    comment_id = comment.id
-
-    yield comment_id
-
-    api.delete_comment(comment_id)
-    api.delete_post(post.id)
+def test_comment(api, test_post, comment_factory):
+    """Создает комментарий к test_post и автоматически удаляет его после теста."""
+    comment = comment_factory(test_post.id)
+    yield comment
+    api.delete_comment(comment.id)
